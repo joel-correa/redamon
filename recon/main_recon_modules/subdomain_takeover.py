@@ -104,6 +104,8 @@ def run_subdomain_takeover(
             ("BADDNS_MODULES", "BadDNS layer"),
             ("BADDNS_NAMESERVERS", "BadDNS layer"),
             ("BADDNS_RUN_TIMEOUT", "BadDNS layer"),
+            ("TAKEOVER_AI_CLASSIFIER", "AI cascade"),
+            ("AI_PIPELINE_MODEL", "AI cascade"),
         ],
     )
 
@@ -113,6 +115,15 @@ def run_subdomain_takeover(
     manual_review_auto_publish = bool(settings.get("TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH", False))
     ai_classifier_enabled = bool(settings.get("TAKEOVER_AI_CLASSIFIER", False))
     ai_pipeline_model = settings.get("AI_PIPELINE_MODEL", "claude-opus-4-6")
+
+    # Announce the AI cascade state up-front, regardless of whether candidates
+    # are produced later. Without this banner, a "no candidates" run is
+    # indistinguishable from a "cascade is off" run in the logs -- you can't
+    # tell whether the wiring is broken or just had nothing to do.
+    if ai_classifier_enabled and ai_pipeline_model:
+        print(f"[*][Takeover-AI] Classifier cascade enabled, model={ai_pipeline_model}")
+    else:
+        print(f"[-][Takeover-AI] Classifier cascade disabled (TAKEOVER_AI_CLASSIFIER={ai_classifier_enabled}, model={ai_pipeline_model!r})")
 
     # --------------------------------------------------------------
     # 1. Target collection
@@ -237,19 +248,26 @@ def run_subdomain_takeover(
         # and otherwise ask the LLM to classify the body. AI verdict feeds
         # ai_waf_likely back into score_finding() which subtracts 40 points
         # so AI-flagged collisions land in manual_review.
-        if ai_classifier_enabled and ai_pipeline_model and normalized:
-            print(f"[*][Takeover-AI] Classifier cascade enabled, model={ai_pipeline_model}")
-            try:
-                _apply_ai_waf_disambiguation(
-                    findings=normalized,
-                    model=ai_pipeline_model,
-                    user_id=os.environ.get("USER_ID", ""),
-                    project_id=os.environ.get("PROJECT_ID", ""),
-                )
-            except Exception as e:
-                # Never let AI failure abort the takeover scan -- emit warning
-                # and continue with the static findings.
-                print(f"[!][Takeover-AI] Cascade pass failed: {e}")
+        if ai_classifier_enabled and ai_pipeline_model:
+            if normalized:
+                print(f"[*][Takeover-AI] Disambiguating {len(normalized)} candidate(s) via LLM cascade")
+                try:
+                    _apply_ai_waf_disambiguation(
+                        findings=normalized,
+                        model=ai_pipeline_model,
+                        user_id=os.environ.get("USER_ID", ""),
+                        project_id=os.environ.get("PROJECT_ID", ""),
+                    )
+                except Exception as e:
+                    # Never let AI failure abort the takeover scan -- emit warning
+                    # and continue with the static findings.
+                    print(f"[!][Takeover-AI] Cascade pass failed: {e}")
+            else:
+                # Cascade is on but Subjack/Nuclei produced zero candidates,
+                # so there's nothing for the LLM to classify. Log explicitly
+                # so the absence of [Takeover-AI] activity is intentional,
+                # not a wiring bug.
+                print("[*][Takeover-AI] No takeover candidates -- cascade has nothing to classify")
 
         # --------------------------------------------------------------
         # 4. Dedupe + score
